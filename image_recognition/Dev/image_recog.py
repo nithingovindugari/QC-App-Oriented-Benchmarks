@@ -15,6 +15,8 @@ from qiskit.circuit.library import RealAmplitudes
 from sklearn.metrics import accuracy_score,log_loss
 from qiskit.circuit import ParameterVector
 
+from qiskit.algorithms.optimizers import SPSA
+
 import expectation_calc
 
 global expectation_calc_method
@@ -51,6 +53,8 @@ expectation_calc_method = True
 
 import expectation_calc
 
+# Number of qubits for the quantum circuit
+num_qubits = 4
 
 # Fetch the MNIST dataset from openml
 mnist = fetch_openml('mnist_784', parser='auto')
@@ -96,11 +100,6 @@ y_train = y_train[:200]
 x_test  = x_test[:50]
 y_test  = y_test[:50]
 
-
-
-# Number of qubits for the quantum circuit
-num_qubits = 8
-
 # After initial development  below code will be move to qubit loop
 # -------------- PCA Compression -----------------
 # Number of principal components to keep as of now it is 14 
@@ -138,7 +137,7 @@ x_scaled_train = scaler.fit_transform(x_train_pca)
 samples_per_batch = 10
 
 # Calculate the total number of batches needed
-num_batches = len(x_scaled_train) // samples_per_batch
+num_batches = np.ceil(len(x_scaled_train) / samples_per_batch)
 
 # Batch the x_scaled_data array
 x_scaled_test_batches = np.array_split(x_scaled_test, num_batches)
@@ -160,21 +159,27 @@ if pca_vis == True:
 
 # Variational circuit  used in below model which has parameters optimized during training
 # Dev Note will be replaced with QCNN 
-def var_circ(num_qubits=num_qubits):
+def var_circ(num_qubits, reps):
     
     # reps is Number of times ry and cx gates are repeated
-    reps = 3
     qc = QuantumCircuit(num_qubits)
-    parameter_vector = ParameterVector("t", length=num_qubits*reps)
+    parameter_vector = ParameterVector("t", length=num_qubits*reps*2)
     # print("parameter_vector",parameter_vector)
     counter = 0
     for rep in range(reps):
-      for i in range(num_qubits):
-          theta = parameter_vector[counter]
-          qc.ry(theta, i)
-          counter += 1
-      for j in range(0, num_qubits - 1, 2):
-          qc.cx(j, j + 1)
+        for i in range(num_qubits):
+            theta = parameter_vector[counter]
+            qc.ry(theta, i)
+            counter += 1
+        
+        for i in range(num_qubits):
+            theta = parameter_vector[counter]
+            qc.rx(theta, i)
+            counter += 1
+    
+        for j in range(0, num_qubits - 1, 1):
+            if rep<reps-1:
+                qc.cx(j, j + 1)
     # print("counter",counter)
     return qc
 
@@ -192,7 +197,7 @@ def var_circ(num_qubits=num_qubits):
 
 
 # model to be used for training which has input data encoded and variational circuit is appended to it
-def qcnn_model(theta, x):
+def qcnn_model(theta, x, num_qubits, reps):
     if expectation_calc_method == True:
         qc = QuantumCircuit(num_qubits)
     else:
@@ -202,9 +207,9 @@ def qcnn_model(theta, x):
     
     # feature mapping 
     for j in range(num_qubits):
-        qc.ry(x[j], j )
+        qc.rx(x[j], j )
     # Append the variational circuit ( Ansatz ) to the quantum circuit
-    qcnn_circ = var_circ(num_qubits)
+    qcnn_circ = var_circ(num_qubits, reps)
     qcnn_circ.assign_parameters(theta, inplace=True)
     qc.compose(qcnn_circ, inplace=True)
     # qc.measure_all()  # Measure all qubits will be changed to measure only 7 qubits if needed
@@ -229,9 +234,6 @@ global threshold
 
 threshold = 0.5
 
-# Number of shots to run the program (experiment)
-num_shots = 1000
-
 # function to calculate the expectation value ( pending :- Analysis in progress to improve or replace below function )
 def expectation_values(result):
     expectation = 0
@@ -245,8 +247,8 @@ def expectation_values(result):
         prediction_label = 1
     else:
         prediction_label = 0
-    print("expectation",expectation)
-    return prediction_label
+    #print("expectation",expectation)
+    #return prediction_label
 
 prediction_label = []
 
@@ -269,48 +271,77 @@ def square_loss(labels, predictions):
     return loss
 
 # function to calculate the loss function
-def loss_function(theta):
+def loss_function(theta, is_draw_circ=False, is_print=False):
     # predicted_label = []
     total_loss = 0
     epsilon = 1e-15  # small value to avoid log(0) errors
     prediction_label = []
+    i_draw = 0
     for data_point, label in zip(x_scaled_train, y_train):
         # Create the quantum circuit for the data point
-        qc = qcnn_model(theta, data_point)
+        qc = qcnn_model(theta, data_point, num_qubits, reps)
+
+        if i_draw==0 and is_draw_circ:
+            print(qc)
+            i_draw += 1
+
         # Simulate the quantum circuit and get the result
         if expectation_calc_method == True:
-            predicted_label = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)    
+            val = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)    
+            val=(val+1)*0.5
         else: 
             job = backend.run(qc, shots=num_shots)
             result = job.result().get_counts(qc)
-            predicted_label = expectation_values(result)
+            val = expectation_values(result)
         # predicted_label = extract_label(result)
-        print("predicted_label",predicted_label)
-        prediction_label.append(predicted_label)
+        #print("predicted_label",predicted_label)
+        prediction_label.append(val)
         
     # Cross entropy loss
     loss = log_loss(y_train, prediction_label)
-    print("cross entropy loss:", loss)
-    loss = square_loss(y_train, prediction_label)
-    print("loss:", loss)
+    #print("cross entropy loss:", loss)
+    #print("theta:", theta)
+    #loss = square_loss(y_train, prediction_label)
+    #print("loss:", loss)
+
+    if is_print:
+        predictions = []
+        for i in range(len(y_train)):
+            if prediction_label[i] > 0.5:
+                predictions.append(1)
+            else:
+                predictions.append(0)
+        accuracy = accuracy_score(y_train, predictions)
+        print("Accuracy:", accuracy, "loss:", loss)
+
     return loss
 
+def callback(theta):
+    #print("theta:", theta)
+    loss_function(theta, is_draw_circ=False, is_print=True)
+
 # Initialize  epochs
-num_epochs = 5
+num_epochs = 1
 reps = 3
+
+# Number of shots to run the program (experiment)
+num_shots = 1000
 
 # Initialize the weights for the QNN model
 np.random.seed(0)
-# weights = np.random.rand(num_qubits * reps )
-weights = np.zeros(num_qubits * reps)
+weights = np.random.rand(num_qubits * reps *2 )
+#weights = np.zeros(num_qubits * reps)
 print(len(weights))
 
 # Will increase the number of epochs once the code is fine tuned to get convergance 
 for epoch in range(num_epochs):
     # Minimize the loss using SPSA optimizer
-    theta = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, options={'maxiter': 20, 'disp': False} )
+    theta = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, callback=callback, options={'maxiter': 100, 'disp': False} )
+    #theta=SPSA(maxiter=100).minimize(loss_function, x0=weights)
+
     loss = theta.fun
     print(f"Epoch {epoch+1}/{num_epochs}, loss = {loss:.4f}")
+
 print("theta function", theta)
     # print(type(theta.x))
 # To find threshold
@@ -325,14 +356,18 @@ print("theta function", theta)
 predictions = []
 
 # Loop over the test data and use theta obtained from training to get the predicted label
-print("x_scaled_test",x_scaled_test)
+#print("x_scaled_test",x_scaled_test)
 print(theta.x)
 print(num_shots)
 for data_point in x_scaled_test:
-    qc = qcnn_model(theta.x, data_point)
+    qc = qcnn_model(theta.x, data_point, num_qubits, reps)
         # Simulate the quantum circuit and get the result
     if expectation_calc_method == True:
-        predicted_label = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)    
+        val = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)   
+        if val > 0.5:
+            predicted_label = 1
+        else:
+            predicted_label = 0
     else: 
         job = backend.run(qc, shots=num_shots)
         result = job.result().get_counts(qc)
