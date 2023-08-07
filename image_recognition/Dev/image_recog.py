@@ -359,11 +359,13 @@ predictions = []
 #print("x_scaled_test",x_scaled_test)
 print(theta.x)
 print(num_shots)
+predictions = []
 for data_point in x_scaled_test:
     qc = qcnn_model(theta.x, data_point, num_qubits, reps)
         # Simulate the quantum circuit and get the result
     if expectation_calc_method == True:
         val = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)   
+        val=(val+1)*0.5
         if val > 0.5:
             predicted_label = 1
         else:
@@ -373,7 +375,7 @@ for data_point in x_scaled_test:
         result = job.result().get_counts(qc)
         predicted_label = expectation_values(result)
     # predicted_label = extract_label(result)
-    print("predicted_label",predicted_label)
+    #print("predicted_label",predicted_label)
     predictions.append(predicted_label)
 
 # Evaluate the QCNN accuracy on the test set once the model is trained and tested

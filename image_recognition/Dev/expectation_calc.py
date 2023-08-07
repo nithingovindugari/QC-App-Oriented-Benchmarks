@@ -97,6 +97,7 @@ def calculate_expectation(base_circuit, shots=None ,num_qubits=None):
     
     #z_operator = PauliSumOp(SparsePauliOp("I"*(num_qubits-1)+"Z"))
     z_operator = PauliSumOp(SparsePauliOp("Z" * num_qubits))
+    #x_operator = PauliSumOp(SparsePauliOp("X" * num_qubits))
     total_operator=z_operator
     
     
