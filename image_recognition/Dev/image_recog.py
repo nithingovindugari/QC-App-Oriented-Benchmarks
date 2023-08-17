@@ -319,7 +319,7 @@ batch_size = 50
 num_batches = int(np.ceil(len(x_scaled_train) / batch_size))
 
 # Learning rate
-init_step_size = 0.1
+init_step_size = 1
 
 # Number of shots to run the program (experiment)
 num_shots = 1000
@@ -365,8 +365,8 @@ y_batch = y_train[indices]
 #    print(data)
 
 
-#res = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, callback=callback, options={'disp': False, 'rhobeg': init_step_size} )
-res= minimizeSPSA(loss_function, x0=weights, a=0.3, c=0.3, niter=1000, callback=callback, paired=False)
+res = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, callback=callback, options={'disp': False, 'rhobeg': init_step_size} )
+#res= minimizeSPSA(loss_function, x0=weights, a=0.3, c=0.3, niter=1000, callback=callback, paired=False)
 
 # Will increase the number of epochs once the code is fine tuned to get convergance 
 #accuracy_values = []
