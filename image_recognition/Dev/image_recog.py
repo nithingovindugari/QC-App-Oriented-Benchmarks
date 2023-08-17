@@ -6,9 +6,10 @@ import numpy as np
 from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, normalize
 import matplotlib.pyplot as plt
-from qiskit.algorithms.optimizers import SPSA
+#from qiskit.algorithms.optimizers import SPSA
+from noisyopt import minimizeSPSA
 from scipy.optimize import minimize
 from qiskit import QuantumCircuit, Aer, transpile,execute
 from qiskit.circuit.library import RealAmplitudes
@@ -18,8 +19,10 @@ from qiskit.circuit import ParameterVector
 from qiskit.algorithms.optimizers import SPSA
 
 import expectation_calc
+from ansatz import ansatz_block, ansatz_qcnn, conv_ansatz
 
 global expectation_calc_method
+batch_index = 0
 
 # change the below variable to True if you want to use expectation_calc.py file for expectation value calculation
 expectation_calc_method = True
@@ -53,13 +56,17 @@ expectation_calc_method = True
 
 import expectation_calc
 
-np.random.seed(64)
+np.random.seed(72)
+
+train_accuracy_history = []
+test_accuracy_history = []
+loss_history = []
 
 # Number of qubits for the quantum circuit
-num_qubits = 8
+num_qubits = 4
 
 # Fetch the MNIST dataset from openml
-mnist = fetch_openml('mnist_784', parser='auto')
+mnist = fetch_openml('mnist_784', parser='auto', version=1, as_frame=False)
 
 # Access the data and target
 # x has all the pixel values of image and has Data shape of (70000, 784)  here 784 is 28*28
@@ -95,24 +102,22 @@ y = (y == 9).astype(int)
 x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=50, train_size=200, random_state=42)
 # print(x.shape, y.shape, x_train.shape, y_train.shape, x_test.shape, y_test.sha?pe)
 
-# Reduce the size of the dataset to 200 training samples and 50 test samples for faster execution 
-# will be removed once the code is ready for final execution
-#x_train = x_train[:200]
-#y_train = y_train[:200]
-#x_test  = x_test[:50]
-#y_test  = y_test[:50]
+## Normalize images between 0 to 1
+#x= normalize(x, norm='l2', axis=1)
+#x_test =  normalize(x_test, norm='l2', axis=1)
+#x_train = normalize(x_train, norm='l2', axis=1)
 
-# After initial development  below code will be move to qubit loop
-# -------------- PCA Compression -----------------
-# Number of principal components to keep as of now it is 14 
 pca = PCA(n_components = num_qubits).fit(x)
-# pca = PCA( ) if pca_check == True else PCA(n_components = num_qubits)
-
 
 # Apply PCA on the data to reduce the dimensions and it is in the form of 'numpy.ndarray'
 x_pca= pca.transform(x)
 x_train_pca = pca.transform(x_train)
 x_test_pca =  pca.transform(x_test)
+
+#Print y_test and x_test one by one
+#print('PCA compressed image')
+#for i in range(len(y_test)):
+#    print("y:", y_test[i], "x:", x_test_pca[i])
 
 # To visualize if prinicipal components are enough and to decide the number of principal components to keep 
 pca_check = False 
@@ -124,34 +129,20 @@ if pca_check == True:
     plt.ylabel('Cumulative Explained Variance Ratio')
     plt.show()
 
-
+#x_scaled_test = x_test_pca
+#x_scaled_train = x_train_pca
 # Create an instance of MinMaxScaler
 scaler = MinMaxScaler(feature_range=(0, 2 * np.pi)).fit(x_pca)
 
-
-# 2PIE
 
 # Apply min-max scaling to the data to bring the values between 0 and 1
 x_scaled_test =  scaler.transform(x_test_pca)
 x_scaled_train = scaler.transform(x_train_pca)
 
-# ------------Dev Note Currently we are not using batching-----------------
-
-# Number of samples per batch
-samples_per_batch = 10
-
-# Calculate the total number of batches needed
-num_batches = np.ceil(len(x_scaled_train) / samples_per_batch)
-
-# Batch the x_scaled_data array
-x_scaled_test_batches = np.array_split(x_scaled_test, num_batches)
-
-# print(x_scaled_test_batches[0].shape)
-
-# for batch in x_scaled_test_batches[:3]:
-#     print("batch",batch)
-
-#----------- Dev Note Currently we are not using batching------------------
+#Print y_test and x_test one by one
+#print('Scaled image')
+#for i in range(len(y_test)):
+#    print("y:", y_test[i], "x:", x_scaled_test[i])
 
 # Data frame here to just to visualize the data and Not needed once model is defined
 pca_vis = False
@@ -161,72 +152,33 @@ if pca_vis == True:
     print(stats)
 
 
-# Variational circuit  used in below model which has parameters optimized during training
-# Dev Note will be replaced with QCNN 
-def var_circ(num_qubits, reps):
-    
-    # reps is Number of times ry and cx gates are repeated
-    qc = QuantumCircuit(num_qubits)
-    parameter_vector = ParameterVector("t", length=num_qubits*reps*2)
-    # print("parameter_vector",parameter_vector)
-    counter = 0
-    for rep in range(reps):
-        for i in range(num_qubits):
-            theta = parameter_vector[counter]
-            qc.ry(theta, i)
-            counter += 1
-        
-        for i in range(num_qubits):
-            theta = parameter_vector[counter]
-            qc.rx(theta, i)
-            counter += 1
-    
-        for j in range(0, num_qubits - 1, 1):
-            if rep<reps-1:
-                qc.cx(j, j + 1)
-    # print("counter",counter)
-    return qc
 
-
-# var_circ for reference
-#      ┌──────────┐ ░            ░ ┌──────────┐ ░            
-# q_0: ┤ RY(θ[0]) ├─░───■────────░─┤ RY(θ[3]) ├─░───■────────
-#      ├──────────┤ ░ ┌─┴─┐      ░ ├──────────┤ ░ ┌─┴─┐      
-# q_1: ┤ RY(θ[1]) ├─░─┤ X ├──■───░─┤ RY(θ[4]) ├─░─┤ X ├──■───
-#      ├──────────┤ ░ └───┘┌─┴─┐ ░ ├──────────┤ ░ └───┘┌─┴─┐ 
-# q_2: ┤ RY(θ[2]) ├─░──────┤ X ├─░─┤ RY(θ[5]) ├─░──────┤ X ├─
-#      └──────────┘ ░      └───┘ ░ └──────────┘ ░      └───┘ 
 
 
 
 
 # model to be used for training which has input data encoded and variational circuit is appended to it
-def qcnn_model(theta, x, num_qubits, reps):
-    if expectation_calc_method == True:
-        qc = QuantumCircuit(num_qubits)
-    else:
-        qc = QuantumCircuit(num_qubits, num_qubits//2)
-    
-    # Encode the pixel data into the quantum circuit here  x is the input data which is list of 14 values
+def model(theta, x, num_qubits, reps=3):
+    qc = QuantumCircuit(num_qubits)
     
     # feature mapping 
     for j in range(num_qubits):
-        qc.rx(x[j], j )
+        qc.ry(x[j], j )
+
     # Append the variational circuit ( Ansatz ) to the quantum circuit
-    qcnn_circ = var_circ(num_qubits, reps)
-    qcnn_circ.assign_parameters(theta, inplace=True)
-    qc.compose(qcnn_circ, inplace=True)
+    if ansatz_type == 'block':
+        var_circ = ansatz_block(num_qubits, reps)
+    elif ansatz_type == 'qcnn':
+        var_circ = ansatz_qcnn(num_qubits)
+    else:
+        print("Invalid var_circ_type")
+
+    var_circ.assign_parameters(theta, inplace=True)
+    qc.compose(var_circ, inplace=True)
     # qc.measure_all()  # Measure all qubits will be changed to measure only 7 qubits if needed
     # Measure only the first 7 qubits
     # Add a classical register with 7 bits to store the results of the measurements
-    if expectation_calc_method == True:
-        # qc.measure_all()
-        pass
-    else:
-        for i in range(num_qubits//2):
-            # print("i",i, "num_qubits//2",num_qubits//2)
-            qc.measure(i, i)
-        
+
     return qc
 
 
@@ -254,8 +206,6 @@ def expectation_values(result):
     #print("expectation",expectation)
     #return prediction_label
 
-prediction_label = []
-
 
 def extract_label(result):
     bitstring = result['counts'].most_common(1)[0][0]
@@ -275,55 +225,25 @@ def square_loss(labels, predictions):
     return loss
 
 # function to calculate the loss function
+
 def loss_function(theta, is_draw_circ=False, is_print=False):
-
     
-    # Get the batch of data
-    x_batch = x_scaled_train[i_batch * batch_size : (i_batch + 1) * batch_size]
-    y_batch = y_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+    #print('called loss function')
 
-    # predicted_label = []
-    total_loss = 0
-    epsilon = 1e-15  # small value to avoid log(0) errors
-    prediction_label = []
-    i_draw = 0
-    for data_point, label in zip(x_batch, y_batch):
-        # Create the quantum circuit for the data point
-        qc = qcnn_model(theta, data_point, num_qubits, reps)
-
-        if i_draw==0 and is_draw_circ:
-            print(qc)
-            i_draw += 1
-
-        # Simulate the quantum circuit and get the result
-        if expectation_calc_method == True:
-            val = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)    
-            val=(val+1)*0.5
-        else: 
-            job = backend.run(qc, shots=num_shots)
-            result = job.result().get_counts(qc)
-            val = expectation_values(result)
-        # predicted_label = extract_label(result)
-        #print("predicted_label",predicted_label)
-        prediction_label.append(val)
+    predictions=calculate_predictions(x_batch, theta, num_qubits, num_shots, reps=reps)
         
     # Cross entropy loss
     #loss = log_loss(y_train, prediction_label)
-    loss = mean_squared_error(y_batch, prediction_label)
+    loss = mean_squared_error(y_batch, predictions)
     #print("cross entropy loss:", loss)
     #print("theta:", theta)
     #loss = square_loss(y_train, prediction_label)
     #print("loss:", loss)
 
     if is_print:
-        predictions = []
-        for i in range(len(y_batch)):
-            if prediction_label[i] > 0.5:
-                predictions.append(1)
-            else:
-                predictions.append(0)
-        accuracy = accuracy_score(y_batch, predictions)
-        print("Train Accuracy:", accuracy, "loss:", loss)
+        accuracy = calculate_accuracy(y_batch, predictions)
+        print("Batch index:", batch_index  , "Train Accuracy:", accuracy, "loss:", loss)
+        train_accuracy_history.append(accuracy)
 
         #test_accuracy=calculate_accuracy(x_scaled_test, y_test, theta, num_qubits, reps, num_shots)
         #print("Test Accuracy:", test_accuracy)
@@ -331,67 +251,142 @@ def loss_function(theta, is_draw_circ=False, is_print=False):
     return loss
 
 def callback(theta):
+
+    #Create a batch from random indices
+
     #print("theta:", theta)
     loss=loss_function(theta, is_draw_circ=False, is_print=True)
+    loss_history.append(loss)
 
-def calculate_accuracy(x, y, theta, num_qubits, reps, num_shots):
-  
+    #Calculate the accuracy on test data
+    test_predictions=calculate_predictions(x_scaled_test, theta, num_qubits, num_shots, reps=reps)
+    test_accuracy=calculate_accuracy(y_test, test_predictions)
+    test_accuracy_history.append(test_accuracy)
+
+    #print(theta)
+    ##Calculate squared difference between test_predications and y_test and print it
+    #squared_difference = (y_test - test_predictions) ** 2
+    #print("squared_difference",squared_difference)
+    #print("test_predictions",test_predictions)
+
+
+    global x_batch, y_batch, batch_index    
+    indices = np.random.choice(len(x_scaled_train), size=batch_size, replace=False)
+    x_batch = x_scaled_train[indices]
+    y_batch = y_train[indices]
+
+    # Get modulus of batch_index with number of batches
+    #global x_batch, y_batch, batch_index
+    #i_batch = batch_index % num_batches
+    #x_batch = x_scaled_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+    #y_batch = y_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+
+    batch_index=batch_index+1
+
+
+# function to calculate the prediction of the model
+def calculate_predictions(x, theta, num_qubits, num_shots, reps=3):
     predictions = []
     for data_point in x:
-        qc = qcnn_model(theta, data_point, num_qubits, reps)
-            # Simulate the quantum circuit and get the result
-        if expectation_calc_method == True:
-            val = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)   
-            val=(val+1)*0.5
-            if val > 0.5:
-                predicted_label = 1
-            else:
-                predicted_label = 0
-        else: 
-            job = backend.run(qc, shots=num_shots)
-            result = job.result().get_counts(qc)
-            predicted_label = expectation_values(result)
-        predictions.append(predicted_label)
-    accuracy = accuracy_score(y, predictions)
+        qc = model(theta, data_point, num_qubits, reps)
+        #print(qc)
+        val = expectation_calc.calculate_expectation(qc,shots=num_shots,num_qubits=num_qubits)   
+        val=(val+1)*0.5
+        predictions.append(val)
+
+    return predictions
+
+
+def calculate_accuracy(y, predictions):
+
+    prediction_labels = []
+    for i in range(len(y)):
+        if predictions[i] > 0.5:
+            prediction_labels.append(1)
+        else:
+            prediction_labels.append(0)
+
+    accuracy = accuracy_score(y, prediction_labels)
+  
+
     return accuracy
 
 # Initialize  epochs
 num_epochs = 100
-reps = 3
-
-# Number of shots to run the program (experiment)
-num_shots = 1000
 
 # Batch size for the optimizer
-batch_size = 20
+batch_size = 50
 num_batches = int(np.ceil(len(x_scaled_train) / batch_size))
 
 # Learning rate
-init_step_size = np.pi
+init_step_size = 0.1
+
+# Number of shots to run the program (experiment)
+num_shots = 1000
+reps = 3
+
+# Choose the variational circuit
+ansatz_type = 'qcnn' # 'block' or 'qcnn'
 
 # Initialize the weights for the QNN model
-weights = np.random.rand(num_qubits * reps *2 )
-#weights = np.zeros(num_qubits * reps)
+if ansatz_type == 'block':
+    num_parameters= num_qubits * reps * 2
+elif ansatz_type == 'qcnn':
+    num_parameters_per_layer=12
+    num_layers = int(np.ceil(np.log2(num_qubits)))
+    num_parameters = num_parameters_per_layer*num_layers
+else:
+    print("Invalid ansatz_type")
+
+weights = np.random.rand(num_parameters)
+#weights = np.zeros(num_parameters)
 print("Number of parameters:", len(weights))
 
-# Will increase the number of epochs once the code is fine tuned to get convergance 
-accuracy_values = []
-for epoch in range(num_epochs):
+global x_batch, y_batch
+indices = np.random.choice(len(x_scaled_train), size=batch_size, replace=False)
+x_batch = x_scaled_train[indices]
+y_batch = y_train[indices]
 
-    for i_batch in range(num_batches):
+#global x_batch, y_batch
+#i_batch = batch_index % num_batches
+#x_batch = x_scaled_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+#y_batch = y_train[i_batch * batch_size : (i_batch + 1) * batch_size]
+
+#for k in range(5):
+#    indices = np.random.choice(len(x_scaled_train), size=batch_size, replace=False)
+#    x_batch = x_scaled_train[indices]
+#    y_batch = y_train[indices]
+#    predictions=calculate_predictions(x_batch, weights, num_qubits, reps, num_shots)
+#
+#    #Form and print a 2 column vector from indices and predictions
+#    indices = indices.reshape(-1, 1)
+#    predictions = np.array(predictions).reshape(-1, 1)
+#    data = np.hstack((indices, predictions))
+#    print(data)
+
+
+#res = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, callback=callback, options={'disp': False, 'rhobeg': init_step_size} )
+res= minimizeSPSA(loss_function, x0=weights, a=0.3, c=0.3, niter=1000, callback=callback, paired=False)
+
+# Will increase the number of epochs once the code is fine tuned to get convergance 
+#accuracy_values = []
+#for epoch in range(num_epochs):
+
+#    for i_batch in range(num_batches):
         # Minimize the loss function
-        res = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, callback=None, options={'maxiter': 1, 'disp': False, 'rhobeg': init_step_size} )
+
+        #res = minimize(loss_function, x0 = weights, method="COBYLA", tol=0.001, callback=None, options={'maxiter': 50, 'disp': False, 'rhobeg': init_step_size} )
         #theta=SPSA(maxiter=100).minimize(loss_function, x0=weights)
 
-        weights = res.x
+        #weights = res.x
 
-        print("Batch number:",i_batch, "loss",res.fun)
+        #print("Batch number:",i_batch, "loss",res.fun)
 
-    train_accuracy = calculate_accuracy(x_scaled_train, y_train, res.x, num_qubits, reps, num_shots)
-    print(f"Epoch {epoch+1}/{num_epochs}, train accuracy = {train_accuracy:.4f}")
-    accuracy_values.append(train_accuracy)
+    #train_accuracy = calculate_accuracy(x_scaled_train, y_train, res.x, num_qubits, reps, num_shots)
+    #print(f"Epoch {epoch+1}/{num_epochs}, train accuracy = {train_accuracy:.4f}")
+    #accuracy_values.append(train_accuracy)
     
-    init_step_size = init_step_size / 1.4
+    #init_step_size = init_step_size / 1.4
 
 #print("result", res)
     # print(type(theta.x))
@@ -403,12 +398,29 @@ for epoch in range(num_epochs):
 # last step is to test the model on test data
 
 # Evaluate the QCNN accuracy on the test set once the model is trained and tested
-test_accuracy=calculate_accuracy(x_scaled_test, y_test, res.x, num_qubits, reps, num_shots)
+test_predictions=calculate_predictions(x_scaled_test, res.x, num_qubits, num_shots, reps=reps)
+test_accuracy=calculate_accuracy(y_test, test_predictions)
 print("Test Accuracy:", test_accuracy)
 
 
 
-# Plot the results
-plt.plot(accuracy_values)
-plt.xlabel("Epoch")
-plt.ylabel("Accuracy")
+#Create a plot with subplots in a grid of 1X3
+fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+
+#Plot train accuracy in the first subplot
+axs[0].plot(train_accuracy_history, label="train accuracy")
+axs[0].set_xlabel("Iteration")
+axs[0].set_ylabel("Train Accuracy")
+
+#Plot test accuracy in the second subplot
+axs[1].plot(test_accuracy_history, label="test accuracy")
+axs[1].set_xlabel("Iteration")
+axs[1].set_ylabel("Test Accuracy")
+
+#Plot loss in the third subplot
+axs[2].plot(loss_history, label="loss")
+axs[2].set_xlabel("Iteration")
+axs[2].set_ylabel("Loss")
+
+#Show the plot
+plt.show()
